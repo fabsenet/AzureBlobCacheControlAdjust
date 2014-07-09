@@ -3,8 +3,9 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
-using Microsoft.WindowsAzure;
-using Microsoft.WindowsAzure.StorageClient;
+using Microsoft.WindowsAzure.Storage;
+using Microsoft.WindowsAzure.Storage.Auth;
+using Microsoft.WindowsAzure.Storage.Blob;
 
 namespace AzureBlobCacheControlAdjust
 {
@@ -24,24 +25,21 @@ namespace AzureBlobCacheControlAdjust
             string container = args[2];
             string maxage = args[3];
 
-            var credentials = new StorageCredentialsAccountAndKey(accountname, key);
-            var baseAddress = String.Format("http://{0}.blob.core.windows.net/", accountname);
-            var client = new CloudBlobClient(baseAddress, credentials);
-            var cloudBlobContainer = client.GetContainerReference(baseAddress+container);
+            var credentials = new StorageCredentials(accountname, key);
+            var storageUri = new StorageUri(new Uri(String.Format("http://{0}.blob.core.windows.net/", accountname)));
+            var client = new CloudBlobClient(storageUri, credentials);
+            var cloudBlobContainer = client.GetContainerReference(container);
 
             var cacheControlHeader = String.Format("public, max-age={0}", maxage);
 
             // get the info for every blob in the container
-            var blobInfos = cloudBlobContainer.ListBlobs(new BlobRequestOptions() {
-                UseFlatBlobListing = true, 
-                BlobListingDetails = BlobListingDetails.All
-            }).Cast<CloudBlob>();
+            var blobInfos = cloudBlobContainer.ListBlobs(null, true, BlobListingDetails.All).OfType<CloudBlockBlob>();
 
-            Parallel.ForEach(blobInfos, new ParallelOptions() {MaxDegreeOfParallelism = Environment.ProcessorCount*2}, (blob) =>
+            Parallel.ForEach(blobInfos, new ParallelOptions() { MaxDegreeOfParallelism = Environment.ProcessorCount * 2 }, (blob) =>
                 {
+
                     var needsSetProperties = false;
                     // get the blob properties
-                    //CloudBlob blob = cloudBlobContainer.GetBlobReference(blobInfo.Uri.ToString());
                     blob.FetchAttributes();
 
                     // set cache-control header if necessary
@@ -56,8 +54,9 @@ namespace AzureBlobCacheControlAdjust
                         Console.Write(".");
                     }
 
-                    if (blob.Uri.AbsolutePath.ToLowerInvariant().EndsWith(".png") &&
-                        blob.Metadata["optimized"] != "true")
+                    var isPngFile = blob.Uri.AbsolutePath.ToLowerInvariant().EndsWith(".png");
+                    var needsOptimization = (!blob.Metadata.ContainsKey("optimized") || blob.Metadata["optimized"] != "true");
+                    if (isPngFile && needsOptimization)
                     {
                         Console.Write("P");
 
@@ -66,11 +65,11 @@ namespace AzureBlobCacheControlAdjust
                         var inFilename = string.Format("{0}_IN.png", f);
                         var outFilename = string.Format("{0}_OUT.png", f);
 
-                        blob.DownloadToFile(inFilename);
+                        blob.DownloadToFile(inFilename, FileMode.CreateNew);
 
                         //execute pngout
-                        var process = Process.Start(new ProcessStartInfo("pngout.exe", string.Format("{0} {1}", inFilename, outFilename)){CreateNoWindow = true,UseShellExecute = true, WindowStyle = ProcessWindowStyle.Hidden});
-                      
+                        var process = Process.Start(new ProcessStartInfo("pngout.exe", string.Format("{0} {1}", inFilename, outFilename)) { CreateNoWindow = true, UseShellExecute = true, WindowStyle = ProcessWindowStyle.Hidden });
+
                         process.PriorityClass = ProcessPriorityClass.BelowNormal;
                         process.WaitForExit();
 
@@ -84,7 +83,7 @@ namespace AzureBlobCacheControlAdjust
                         {
                             //we could save!
                             blob.Properties.CacheControl = cacheControlHeader;
-                            blob.UploadFile(outFilename);
+                            blob.UploadFromFile(outFilename, FileMode.Open);
                         }
 
                     }
